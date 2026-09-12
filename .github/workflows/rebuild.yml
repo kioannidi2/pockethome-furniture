@@ -1,0 +1,31 @@
+name: Rebuild furniture site from Strapi
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Build index.html from Strapi + template
+        run: node build.mjs
+      - name: Commit and push if index.html changed
+        run: |
+          if git diff --quiet -- index.html; then
+            echo "No changes to index.html - nothing to deploy."
+            exit 0
+          fi
+          git config user.name "pockethome-bot"
+          git config user.email "actions@github.com"
+          git add index.html
+          git commit -m "Auto-rebuild: sync furniture catalog from Strapi"
+          git push
