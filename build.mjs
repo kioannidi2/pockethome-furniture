@@ -38,20 +38,25 @@ const OUTPUT_PATH = path.join(__dirname, 'index.html');
 
 // Strapi's free-text `category` field (checked together with the item name,
 // since e.g. single-vs-double only shows up in the name, not the category)
-// -> {catalogKey, keyPrefix}. Order matters: more specific patterns are
-// listed first so e.g. "Bedside" is claimed by the nightstand rule before
-// the generic bed rule ever sees it. The bed rule uses a \b word boundary
-// so it does NOT match "Bedside" as a substring — that exact bug caused
-// real nightstands (Isla, Selma, Boho) and a bedside table to be filed
-// under "bed" in production; keep the boundary when editing this list.
+// -> {catalogKey, keyPrefix}. Order matters a lot here — two real bugs found
+// in production runs of this script came from rule ORDER, not just the
+// individual patterns, so read this before reordering:
+//  1. The bed rule uses a \b word boundary so it does NOT match "Bedside" as
+//     a substring (that bug filed real nightstands — Isla, Selma, Boho — and
+//     a bedside table under "bed").
+//  2. sofa is checked BEFORE any bed rule, because "sofa-bed" / "3-seater
+//     sofa-bed" names contain "bed" as its own \b-bounded word (the hyphen
+//     counts as a boundary) — without this ordering, every sofa-bed product
+//     (Vox, Rebel, Breathe, Romina, Lilian...) gets miscategorised as "bed".
+// Keep nightstand/wardrobe/armchair/sofa ahead of the bed rules for this reason.
 const CATEGORY_RULES = [
   { test: /bedside|night ?stand|κομοδιν/i, cat: 'nightstand', prefix: 'ns_' },
-  { test: /single/i, and: /\bbed\b/i, cat: 'bed_single', prefix: 'bed_single_' },
-  { test: /\bbed\b/i, cat: 'bed', prefix: 'bed_' },
   { test: /wardrobe|ντουλαπ/i, cat: 'wardrobe', prefix: 'wd_' },
   { test: /arm ?chair|πολυθρον/i, cat: 'armchair', prefix: 'ac_' },
   { test: /sofa|couch|καναπ/i, cat: 'sofa', prefix: 'sf_' },
-  { test: /coffee ?table|^table$|τραπεζ/i, cat: 'table', prefix: 'ct_' },
+  { test: /single/i, and: /\bbed\b/i, cat: 'bed_single', prefix: 'bed_single_' },
+  { test: /\bbed\b/i, cat: 'bed', prefix: 'bed_' },
+  { test: /coffee ?table|\btable\b|τραπεζ/i, cat: 'table', prefix: 'ct_' },
   { test: /sideboard|tv ?unit|τηλεορασ/i, cat: 'tvunit', prefix: 'tv_' },
 ];
 
