@@ -36,20 +36,54 @@ const TEMPLATE_PATH = path.join(__dirname, 'template.html');
 const PHOTOS_PATH = path.join(__dirname, 'photos_data.json');
 const OUTPUT_PATH = path.join(__dirname, 'index.html');
 
-// Strapi's free-text `category` field -> {catalogKey, keyPrefix}. Based on the
-// actual category values observed in the database (Sofa, Bed, Bedside,
-// Wardrobe, Armchair, Sideboard, ...) — extend this list if new category
-// strings show up in Strapi (an unmapped category is skipped, not guessed).
+// Strapi's free-text `category` field (checked together with the item name,
+// since e.g. single-vs-double only shows up in the name, not the category)
+// -> {catalogKey, keyPrefix}. Order matters: more specific patterns are
+// listed first so e.g. "Bedside" is claimed by the nightstand rule before
+// the generic bed rule ever sees it. The bed rule uses a \b word boundary
+// so it does NOT match "Bedside" as a substring — that exact bug caused
+// real nightstands (Isla, Selma, Boho) and a bedside table to be filed
+// under "bed" in production; keep the boundary when editing this list.
 const CATEGORY_RULES = [
-  { test: /single/i, and: /bed/i, cat: 'bed_single', prefix: 'bed_single_' },
-  { test: /bed/i, cat: 'bed', prefix: 'bed_' },
   { test: /bedside|night ?stand|κομοδιν/i, cat: 'nightstand', prefix: 'ns_' },
+  { test: /single/i, and: /\bbed\b/i, cat: 'bed_single', prefix: 'bed_single_' },
+  { test: /\bbed\b/i, cat: 'bed', prefix: 'bed_' },
   { test: /wardrobe|ντουλαπ/i, cat: 'wardrobe', prefix: 'wd_' },
   { test: /arm ?chair|πολυθρον/i, cat: 'armchair', prefix: 'ac_' },
   { test: /sofa|couch|καναπ/i, cat: 'sofa', prefix: 'sf_' },
   { test: /coffee ?table|^table$|τραπεζ/i, cat: 'table', prefix: 'ct_' },
   { test: /sideboard|tv ?unit|τηλεορασ/i, cat: 'tvunit', prefix: 'tv_' },
 ];
+
+// Filler words that never identify a specific product on their own — used
+// both to pick a sensible "core" word for the key/label and (implicitly,
+// via isAlreadyCurated matching on the raw name) don't affect dedup.
+const GENERIC_WORDS = new Set([
+  'bed', 'beds', 'double', 'single', 'upholstered', 'platform',
+  'table', 'tables', 'coffee', 'side', 'end',
+  'sofa', 'sofas', 'couch', 'corner', 'seater', 'three-seater', 'two-seater',
+  'reversible', 'footstool', 'sofa-bed', 'with', 'and', 'the', 'of', 'for',
+  'wardrobe', 'wardrobes', 'doors', 'door',
+  'armchair', 'armchairs', 'chair',
+  'nightstand', 'nightstands', 'bedside', 'drawer', 'two-drawer', 'one-drawer',
+  'tv', 'unit', 'units', 'sideboard', 'stand',
+]);
+
+// Picks the last word in the name that isn't generic filler or a bare
+// number — usually the actual brand/model name (Karolina, Olympus, Afina...).
+// Returns null when every word is filler, so the caller can fall back to
+// using the whole name instead of a meaningless single word.
+function coreWord(name) {
+  const words = String(name).trim().split(/\s+/);
+  for (let i = words.length - 1; i >= 0; i--) {
+    const w = words[i].replace(/[.,]/g, '');
+    if (!w) continue;
+    if (/^\d+$/.test(w)) continue;
+    if (GENERIC_WORDS.has(w.toLowerCase())) continue;
+    return w;
+  }
+  return null;
+}
 
 // Same colour vocabulary as the page's own chat assistant (template.html COLOR_WORDS),
 // so Strapi's `color` field (English or Greek) maps to the site's colour tokens.
@@ -79,12 +113,15 @@ function slugify(s) {
     .replace(/^_+|_+$/g, '');
 }
 
-function mapCategory(strapiCategory) {
-  if (!strapiCategory) return null;
+// Matches against category + name together (not category alone) since some
+// distinctions — e.g. single vs. double bed — only show up in the name.
+function mapCategory(strapiCategory, name) {
+  const text = `${strapiCategory || ''} ${name || ''}`;
+  if (!text.trim()) return null;
   for (const rule of CATEGORY_RULES) {
     if (rule.and) {
-      if (rule.test.test(strapiCategory) && rule.and.test(strapiCategory)) return rule;
-    } else if (rule.test.test(strapiCategory)) {
+      if (rule.test.test(text) && rule.and.test(text)) return rule;
+    } else if (rule.test.test(text)) {
       return rule;
     }
   }
@@ -101,10 +138,12 @@ function mapColors(strapiColor) {
   return found.length ? found : null;
 }
 
-function buildModelLabel(name, catKey) {
+// `core` is the distinctive word picked by coreWord(name), or null when the
+// whole name is generic filler (e.g. "Two-Drawer Bedside Table") — in which
+// case the full name is used as the label instead of a meaningless single word.
+function buildModelLabel(name, catKey, core) {
   const trimmed = String(name).trim();
-  const last = trimmed.split(/\s+/).pop() || trimmed;
-  let label = last.toUpperCase();
+  let label = core ? core.toUpperCase() : trimmed;
   if (catKey === 'sofa') {
     const lower = trimmed.toLowerCase();
     const tags = [];
@@ -135,7 +174,10 @@ function extractCatalog(templateSrc) {
 // Is this Strapi item actually the same product as something already in the
 // hand-curated catalog, just entered under a slightly different name? Match
 // by checking whether any significant (Latin, 3+ letter) word from an
-// existing option's model label appears as a whole word in the Strapi name.
+// existing option's model label appears anywhere in the Strapi name — plain
+// substring, not a whole-word match, since Strapi names sometimes glue a
+// supplier/variant suffix onto the curated word with no space (e.g. the
+// curated "ARTE" sofa shows up in Strapi as "ArteLibre Kuzco").
 function isAlreadyCurated(catalogCategory, name) {
   if (!catalogCategory) return false;
   const upperName = name.toUpperCase();
@@ -145,7 +187,7 @@ function isAlreadyCurated(catalogCategory, name) {
       .toUpperCase()
       .split(/\s+/)
       .filter((w) => w.length >= 3 && /^[A-Z0-9]+$/.test(w));
-    return words.some((w) => new RegExp('\\b' + w + '\\b').test(upperName));
+    return words.some((w) => upperName.indexOf(w) !== -1);
   });
 }
 
@@ -211,7 +253,7 @@ async function main() {
       skipped++; continue;
     }
 
-    const rule = mapCategory(item.category);
+    const rule = mapCategory(item.category, name);
     if (!rule) { warn(`"${name}" — unrecognised category "${item.category}", skipping`); skipped++; continue; }
 
     if (isAlreadyCurated(catalog[rule.cat], name)) {
@@ -225,7 +267,8 @@ async function main() {
     const imgUrl = firstImageUrl(item);
     if (!imgUrl) { warn(`"${name}" — no image uploaded, skipping`); skipped++; continue; }
 
-    const key = rule.prefix + slugify(name.split(/\s+/).pop());
+    const core = coreWord(name);
+    const key = rule.prefix + slugify(core || name);
     if (basePhotos[key] || extraPhotos[key]) { alreadyCurated++; continue; } // exact key collision safety net
 
     try {
@@ -236,7 +279,7 @@ async function main() {
     }
 
     if (!extra[rule.cat]) extra[rule.cat] = [];
-    extra[rule.cat].push({ key, model: buildModelLabel(name, rule.cat), price });
+    extra[rule.cat].push({ key, model: buildModelLabel(name, rule.cat, core), price });
 
     const colors = mapColors(item.color);
     if (colors) extraColors[key] = colors;
